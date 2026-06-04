@@ -1,334 +1,193 @@
-\# py\_cashu
+# py_cashu
 
+A small educational project exploring the Cashu protocol from Python.
 
+The goal is not to build a production-ready wallet. The project is a hands-on
+console experiment for understanding how Cashu mints, Lightning invoices, blind
+signatures, proofs, bearer tokens, wallet seed material, and token transfers fit
+together.
 
-A small educational project exploring the Cashu protocol using Python.
+## What Is Cashu?
 
+Cashu is an open protocol for bearer digital cash built on top of Bitcoin and
+the Lightning Network.
 
-
-The goal is not to build a production-ready wallet, but to better understand how Cashu mints, Lightning invoices, blind signatures, proofs, and token transfers work under the hood.
-
-
-
-\---
-
-
-
-\# What is Cashu?
-
-
-
-Cashu is an open protocol for bearer digital cash built on top of Bitcoin and the Lightning Network.
-
-
-
-Unlike Bitcoin itself, Cashu uses a trusted mint (custodian) that issues cryptographic tokens representing value. These tokens can be transferred privately between users without the mint learning who paid whom.
-
-
+Unlike Bitcoin itself, Cashu uses a trusted mint that issues cryptographic
+tokens representing value. These tokens can be transferred privately between
+users without the mint learning who paid whom.
 
 Cashu combines:
 
+- Bitcoin as the underlying asset
+- Lightning Network for deposits and withdrawals
+- Blind signatures for privacy
+- Bearer tokens for transferability
+- Open standards known as NUTs, the Cashu protocol specifications
 
+## Simplified Workflow
 
-\* Bitcoin as the underlying asset
+### Deposit
 
-\* Lightning Network for deposits and withdrawals
+1. The user requests a Lightning invoice from a mint.
+2. The user pays the invoice.
+3. The wallet creates blinded messages.
+4. The mint signs the blinded messages.
+5. The wallet unblinds the signatures and receives proofs, which are Cashu
+   tokens.
 
-\* Blind signatures for privacy
+### Transfer
 
-\* Bearer tokens for transferability
+1. The sender exports a Cashu token.
+2. The receiver imports the token into their own wallet.
+3. The receiver swaps the proofs with the mint.
+4. New proofs are issued to the receiver.
 
-\* Open standards known as NUTs (Cashu protocol specifications)
+### Withdraw
 
+1. The user presents proofs to the mint.
+2. The mint pays a Lightning invoice.
+3. The spent proofs become invalid.
 
+## Current Console Demo
 
-\## Simplified workflow
+`simple_py_cashu.py` is the working terminal test for this repository.
 
+It is intentionally verbose and educational. It connects to `https://cashu.cz`,
+uses the local wallet database at `cashu_cz_demo.sqlite`, and exposes protocol
+details that a production wallet would usually hide.
 
+Run it from PowerShell:
 
-\### Deposit
-
-
-
-1\. User requests a Lightning invoice from a mint.
-
-2\. User pays the invoice.
-
-3\. Wallet creates blinded messages.
-
-4\. Mint signs the blinded messages.
-
-5\. Wallet unblinds the signatures and receives proofs (Cashu tokens).
-
-
-
-\### Transfer
-
-
-
-1\. User sends a Cashu token to another user.
-
-2\. Receiver imports the token into their wallet.
-
-3\. Receiver swaps the proofs with the mint.
-
-4\. New proofs are issued to the receiver.
-
-
-
-\### Withdraw
-
-
-
-1\. User presents proofs to the mint.
-
-2\. Mint pays a Lightning invoice.
-
-3\. Proofs become invalid.
-
-
-
-\---
-
-
-
-\# simple\_py\_cashu.py
-
-
-
-`simple\_py\_cashu.py` is a verbose educational example built around the official Python Cashu library.
-
-
-
-Its purpose is to demonstrate the complete flow:
-
-
-
-```text
-
-Lightning invoice
-
-&#x20;       ↓
-
-Invoice payment
-
-&#x20;       ↓
-
-Cashu minting
-
-&#x20;       ↓
-
-Token export
-
-&#x20;       ↓
-
-Token transfer
-
+```powershell
+.\venv\Scripts\Activate.ps1
+python simple_py_cashu.py
 ```
 
+The menu currently supports:
 
+1. Showing mint and wallet information.
+2. Showing or setting up the wallet seed / mnemonic.
+3. Requesting a Lightning invoice and creating a Cashu token after payment.
 
-\## Features
+## Seed And `.env`
 
+The console demo can keep the wallet mnemonic in a local `.env` file:
 
-
-\* Connect to a Cashu mint
-
-\* Display mint information
-
-\* Create Lightning invoices
-
-\* Mint Cashu tokens
-
-\* Export tokens
-
-\* Generate QR codes
-
-\* Inspect wallet data
-
-\* Explore SQLite wallet storage
-
-
-
-\## Generated files
-
-
-
-Invoice:
-
-
-
-```text
-
-temp\_invoice.txt
-
-temp\_invoice.png
-
+```dotenv
+CASHU_MNEMO="your mnemonic words stay here"
 ```
 
+Do not commit `.env` or any real mnemonic material. A Cashu mnemonic controls
+wallet secrets and must be treated as sensitive data.
 
+The seed menu in `simple_py_cashu.py` has two directions:
 
-Token:
+- `Load from .env` reads `CASHU_MNEMO` and overwrites the mnemonic stored in the
+  local SQLite wallet database. Before changing the database, the script writes
+  `temp_seed_backup.txt`.
+- `Save to .env` reads the current SQLite wallet mnemonic and stores it as
+  `CASHU_MNEMO` in `.env`.
 
+After changing the SQLite seed or mnemonic, restart the console app before
+continuing with wallet operations.
 
+## Generated Files
+
+The demo writes generated test artifacts into the project directory.
+
+Lightning invoice:
 
 ```text
-
-temp\_token.txt
-
-temp\_token.png
-
+temp_invoice.txt
+temp_invoice.png
 ```
 
+Cashu token:
 
+```text
+temp_token.txt
+temp_token.png
+```
 
-These files make it easy to test transfers between devices and wallets.
+Seed backup, created only when loading a new mnemonic from `.env` into SQLite:
 
+```text
+temp_seed_backup.txt
+```
 
+Local wallet database:
 
-\## Educational focus
+```text
+cashu_cz_demo.sqlite/
+```
 
+These files are useful for testing transfers between devices and wallets, but
+they can contain sensitive or spendable material. Treat exported tokens and seed
+backups carefully.
 
+## Educational Focus
 
 The code intentionally contains a large amount of logging and debug output.
 
-
-
 Rather than hiding protocol details, it exposes:
 
-
-
-\* quote IDs
-
-\* invoices
-
-\* keysets
-
-\* wallet metadata
-
-\* SQLite contents
-
-\* exported tokens
-
-
+- quote IDs
+- Lightning invoices
+- mint keysets
+- wallet metadata
+- SQLite wallet contents
+- exported Cashu tokens
+- wallet seed / mnemonic sources
 
 This makes it easier to understand how a Cashu wallet operates internally.
 
+## Requirements
 
+Install dependencies into the local virtual environment:
 
-\---
-
-
-
-\# py\_cashu\_app.py
-
-
-
-Work in progress.
-
-
-
-The next step of this project is a more user-friendly desktop wallet built with:
-
-
-
-\* Python
-
-\* Cashu
-
-\* Qt6 / PyQt6
-
-
-
-The goal is to create a lightweight educational Cashu wallet with a graphical user interface.
-
-
-
-Planned features:
-
-
-
-\* Mint management
-
-\* Balance overview
-
-\* Receive tokens
-
-\* Send tokens
-
-\* QR scanning
-
-\* QR generation
-
-\* Lightning deposits
-
-\* Lightning withdrawals
-
-\* Multiple mints
-
-\* Improved token management
-
-
-
-The application is intended primarily as a learning project and protocol exploration tool.
-
-
-
-\---
-
-
-
-\# Requirements
-
-
-
-```bash
-
-pip install cashu
-
-pip install "qrcode\[pil]"
-
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
+The minimal dependency set is:
 
+```text
+cashu>=0.20.1
+qrcode[pil]>=8.0
+python-dotenv>=1.0.1
+```
 
-\---
+## Status
 
+Working:
 
+- `simple_py_cashu.py` terminal demo
+- mint info inspection
+- Lightning invoice generation
+- QR code generation
+- Cashu token export
+- SQLite wallet inspection
+- `.env` mnemonic import/export
 
-\# References
+Not production ready:
 
+- real wallet UX
+- robust error handling
+- secure secret storage
+- multi-mint wallet management
+- token import / receive flow
+- Lightning withdrawal flow
 
+## Notes
 
-Cashu protocol:
+This is an experiment, not a production Evolu Python client. Any real Evolu
+logic still belongs to the official TypeScript packages.
 
+## References
 
-
-https://cashu.space
-
-
-
-Cashu specifications (NUTs):
-
-
-
-https://github.com/cashubtc/nuts
-
-
-
-Nutshell implementation:
-
-
-
-https://github.com/cashubtc/nutshell
-
-
-
-Lightning Network:
-
-
-
-https://lightning.network
-
-
-
+- [Cashu protocol](https://cashu.space)
+- [Cashu specifications, NUTs](https://github.com/cashubtc/nuts)
+- [Nutshell implementation](https://github.com/cashubtc/nutshell)
+- [Lightning Network](https://lightning.network)
