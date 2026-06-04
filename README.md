@@ -69,6 +69,36 @@ The menu currently supports:
 2. Showing or setting up the wallet seed / mnemonic.
 3. Requesting a Lightning invoice and creating a Cashu token after payment.
 
+## Qt App
+
+`cashu_app.py` is the new Qt6 desktop experiment built from the working console
+flow. UI layout and styling live in the external `cashu_ui.py` module.
+
+Run it from PowerShell:
+
+```powershell
+.\venv\Scripts\Activate.ps1
+python cashu_app.py
+```
+
+The app keeps the same educational shape:
+
+- left side menu for mint, keys, invoices, tokens, and mock data
+- upper right verbose logs
+- lower right QR preview for invoices and tokens
+- mint selection between `cashu.cz`, `kashu.me`, and `cashu.21m.lol`
+- `.env` mnemonic display/import/export
+- invoice TXT/PNG generation
+- token TXT/PNG generation
+- local token history in `cashu_app.sqlite3`
+- redeeming pasted tokens into the selected mint, including cross-mint moves
+  through Lightning when needed
+- offline mock tokens for testing token database behavior
+
+The token table stores `created_at`, mint, amount, label, token text, output
+paths, used/unspent state, and whether the row is a mock token. The UI shows the
+last five rows and provides actions to toggle used state or delete a row.
+
 ## Seed And `.env`
 
 The console demo can keep the wallet mnemonic in a local `.env` file:
@@ -119,6 +149,9 @@ Local wallet database:
 
 ```text
 cashu_cz_demo.sqlite/
+kashu_me_demo.sqlite/
+cashu_21m_lol_demo.sqlite/
+cashu_app.sqlite3
 ```
 
 These files are useful for testing transfers between devices and wallets, but
@@ -164,12 +197,14 @@ python-dotenv>=1.0.1
 Working:
 
 - `simple_py_cashu.py` terminal demo
+- `cashu_app.py` Qt6 desktop demo
 - mint info inspection
 - Lightning invoice generation
 - QR code generation
 - Cashu token export
 - SQLite wallet inspection
 - `.env` mnemonic import/export
+- local token table with mock-token testing
 
 Not production ready:
 
