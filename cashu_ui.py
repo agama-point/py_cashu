@@ -7,13 +7,14 @@ from typing import Any
 
 from cashu.core.helpers import sum_proofs
 from cashu.wallet.helpers import deserialize_token_from_string
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -32,6 +33,9 @@ from PyQt6.QtWidgets import (
 )
 
 
+VER = "0.2 | 2026-06"
+
+
 class MainWindow(QWidget):
     action_requested = pyqtSignal(str, object)
     mint_requested = pyqtSignal(int)
@@ -46,6 +50,9 @@ class MainWindow(QWidget):
         self._current_qr_path = ""
         self._selected_token_id: int | None = None
         self._selected_token_text = ""
+        self._invoice_poll_timer = QTimer(self)
+        self._invoice_poll_timer.setInterval(10_000)
+        self._invoice_poll_timer.timeout.connect(self._poll_invoice_payment)
         self._build_ui()
         self._apply_theme()
 
@@ -66,15 +73,30 @@ class MainWindow(QWidget):
         layout = QVBoxLayout(panel)
         layout.setSpacing(8)
 
-        title = QLabel("Cashu actions")
-        title.setObjectName("Title")
-        layout.addWidget(title)
+        title_row = QHBoxLayout()
+        title = QLabel("Agama Cashu App")
+        title.setObjectName("AppTitle")
+        title_row.addWidget(title)
+        version = QLabel(f"ver. {VER}")
+        version.setObjectName("Version")
+        title_row.addWidget(version)
+        title_row.addStretch()
+        layout.addLayout(title_row)
 
         mint_box = QGroupBox("Mint")
         mint_layout = QVBoxLayout(mint_box)
+        mint_top = QHBoxLayout()
+        mint_top.setSpacing(8)
         self.mint_combo = QComboBox()
+        self.mint_combo.setMinimumWidth(260)
+        self.mint_combo.setMaximumWidth(520)
         self.mint_combo.currentIndexChanged.connect(self.mint_requested.emit)
-        mint_layout.addWidget(self.mint_combo)
+        mint_top.addWidget(self.mint_combo)
+        get_info_btn = self._action_button("Get info", "mint_info")
+        get_info_btn.setMaximumWidth(110)
+        mint_top.addWidget(get_info_btn)
+        mint_top.addStretch()
+        mint_layout.addLayout(mint_top)
         self.mint_info_label = QLabel("")
         self.mint_info_label.setWordWrap(True)
         mint_layout.addWidget(self.mint_info_label)
@@ -99,53 +121,78 @@ class MainWindow(QWidget):
         layout.addWidget(actions)
 
         invoice_box = QGroupBox("Invoice and token")
-        invoice_layout = QGridLayout(invoice_box)
-        invoice_layout.setSpacing(6)
+        invoice_layout = QVBoxLayout(invoice_box)
+        invoice_layout.setSpacing(8)
+        invoice_form = QHBoxLayout()
+        invoice_form.setSpacing(8)
         self.amount_input = QLineEdit("21")
         self.amount_input.setPlaceholderText("Amount in sats")
-        self.amount_input.setMaximumWidth(70)
+        self.amount_input.setMinimumWidth(140)
+        self.amount_input.setMaximumWidth(180)
         self.label_input = QLineEdit()
         self.label_input.setPlaceholderText("Token label")
-        self.label_input.setMaximumWidth(440)
-        invoice_layout.addWidget(QLabel("Amount"), 0, 0)
-        invoice_layout.addWidget(self.amount_input, 0, 1)
-        invoice_layout.addWidget(QLabel("Label"), 0, 2)
-        invoice_layout.addWidget(self.label_input, 0, 3)
-        self._add_action(invoice_layout, 1, 0, "Create invoice", "request_invoice")
-        self._add_action(invoice_layout, 1, 1, "Mint token after payment", "mint_token")
-        self._add_action(invoice_layout, 1, 2, "Create mock token", "mock_token")
-        invoice_layout.setColumnStretch(0, 1)
-        invoice_layout.setColumnStretch(1, 0)
-        invoice_layout.setColumnStretch(2, 1)
-        invoice_layout.setColumnStretch(3, 2)
+        self.label_input.setMinimumWidth(360)
+        self.label_input.setMaximumWidth(720)
+        amount_label = QLabel("Amount")
+        amount_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        amount_label.setMaximumWidth(amount_label.sizeHint().width() + 6)
+        label_label = QLabel("Label")
+        label_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        label_label.setMaximumWidth(label_label.sizeHint().width() + 6)
+        invoice_form.addWidget(amount_label)
+        invoice_form.addWidget(self.amount_input)
+        invoice_form.addWidget(label_label)
+        invoice_form.addWidget(self.label_input, stretch=1)
+        invoice_layout.addLayout(invoice_form)
+
+        invoice_actions = QHBoxLayout()
+        invoice_actions.setSpacing(8)
+        self.create_invoice_button = self._action_button("Create invoice", "request_invoice")
+        invoice_actions.addWidget(self.create_invoice_button)
+        self.mint_token_button = self._action_button("Mint token after payment", "mint_token")
+        invoice_actions.addWidget(self.mint_token_button)
+        self.mint_token_button.setEnabled(False)
+        invoice_actions.addWidget(self._action_button("Create mock token", "mock_token"))
+        invoice_actions.addStretch()
+        invoice_layout.addLayout(invoice_actions)
         layout.addWidget(invoice_box)
 
         token_box = QGroupBox("Last saved tokens")
         token_layout = QVBoxLayout(token_box)
-        self.tokens_table = QTableWidget(0, 5)
-        self.tokens_table.setHorizontalHeaderLabels(["Time", "Label", "Amount", "$", "Del"])
+        self.tokens_table = QTableWidget(0, 6)
+        self.tokens_table.setHorizontalHeaderLabels(["Time", "Mint", "Label", "Amount", "$", "Del"])
         self.tokens_table.verticalHeader().setVisible(False)
-        self.tokens_table.setColumnWidth(0, 145)
-        self.tokens_table.setColumnWidth(1, 180)
-        self.tokens_table.setColumnWidth(2, 70)
-        self.tokens_table.setColumnWidth(3, 52)
-        self.tokens_table.setColumnWidth(4, 58)
+        self.tokens_table.setColumnWidth(0, 110)
+        self.tokens_table.setColumnWidth(1, 90)
+        self.tokens_table.setColumnWidth(2, 180)
+        self.tokens_table.setColumnWidth(3, 70)
+        self.tokens_table.setColumnWidth(4, 52)
+        self.tokens_table.setColumnWidth(5, 58)
         self.tokens_table.cellClicked.connect(self._token_cell_clicked)
         token_layout.addWidget(self.tokens_table)
 
         token_actions = QHBoxLayout()
-        unspent_btn = QPushButton("unspent")
+        token_actions.setSpacing(8)
+        unspent_btn = QPushButton("Unspent")
+        unspent_btn.setMaximumWidth(110)
         unspent_btn.clicked.connect(lambda: self.action_requested.emit("set_token_filter", {"filter": "unspent"}))
         token_actions.addWidget(unspent_btn)
-        all_btn = QPushButton("all")
+        all_btn = QPushButton("All")
+        all_btn.setMaximumWidth(70)
         all_btn.clicked.connect(lambda: self.action_requested.emit("set_token_filter", {"filter": "all"}))
         token_actions.addWidget(all_btn)
-        info_btn = QPushButton("info")
+        token_label = QLabel("Token")
+        token_label.setObjectName("Muted")
+        token_actions.addWidget(token_label)
+        info_btn = QPushButton("Info")
+        info_btn.setMaximumWidth(80)
         info_btn.clicked.connect(self._open_token_info_dialog)
         token_actions.addWidget(info_btn)
-        redeem_btn = QPushButton("redeem")
+        redeem_btn = QPushButton("Redeem")
+        redeem_btn.setMaximumWidth(100)
         redeem_btn.clicked.connect(self._open_redeem_dialog)
         token_actions.addWidget(redeem_btn)
+        token_actions.addStretch()
         token_layout.addLayout(token_actions)
 
         layout.addWidget(token_box, stretch=1)
@@ -177,6 +224,7 @@ class MainWindow(QWidget):
         vertical = QSplitter(Qt.Orientation.Vertical)
         vertical.setHandleWidth(8)
         self.debug_box = QTextBrowser()
+        self.debug_box.setObjectName("VerboseLog")
         vertical.addWidget(self.debug_box)
 
         qr_panel = QFrame()
@@ -203,10 +251,18 @@ class MainWindow(QWidget):
 
         return panel
 
-    def _add_action(self, layout: QGridLayout, row: int, column: int, label: str, action: str) -> None:
+    def _add_action(self, layout: QGridLayout, row: int, column: int, label: str, action: str) -> QPushButton:
+        button = self._action_button(label, action)
+        layout.addWidget(button, row, column)
+        return button
+
+    def _action_button(self, label: str, action: str) -> QPushButton:
         button = QPushButton(label)
         button.clicked.connect(lambda _checked=False, name=action: self._emit_action(name))
-        layout.addWidget(button, row, column)
+        return button
+
+    def _poll_invoice_payment(self) -> None:
+        self._emit_action("check_invoice_payment")
 
     def _add_confirmed_action(
         self,
@@ -310,15 +366,62 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "Token info", "Select a saved token first.")
             return
 
+        data = self._token_preview_data(self._selected_token_text)
+        self.append_debug("[token info parsed]\n" + json.dumps(data, indent=2, ensure_ascii=False))
+
         dialog = QDialog(self)
         dialog.setWindowTitle("Token info")
         dialog.resize(760, 520)
 
         layout = QVBoxLayout(dialog)
-        parsed = QTextEdit()
-        parsed.setReadOnly(True)
-        parsed.setPlainText(self._token_preview_text(self._selected_token_text))
-        layout.addWidget(parsed, stretch=1)
+        if "error" in data:
+            error = QLabel(str(data["error"]))
+            error.setWordWrap(True)
+            layout.addWidget(error)
+        else:
+            selected = self._selected_token_row()
+
+            summary_box = QGroupBox("Summary")
+            summary = QFormLayout(summary_box)
+            self._add_info_row(summary, "Amount", f"{data.get('amount', 0)} sats")
+            self._add_info_row(summary, "Proofs", str(data.get("proof_count", 0)))
+            self._add_info_row(summary, "Mint", str(data.get("mint") or selected.get("mint_label") or ""))
+            self._add_info_row(summary, "Unit", str(data.get("unit") or "sat"))
+            self._add_info_row(summary, "Token type", str(data.get("token_type") or ""))
+            self._add_info_row(summary, "Memo", str(data.get("memo") or ""))
+            layout.addWidget(summary_box)
+
+            local_box = QGroupBox("Local record")
+            local = QFormLayout(local_box)
+            self._add_info_row(local, "ID", str(selected.get("id") or self._selected_token_id or ""))
+            self._add_info_row(local, "Created", str(selected.get("created_at") or ""))
+            self._add_info_row(local, "Label", str(selected.get("label") or ""))
+            self._add_info_row(local, "State", "spent" if selected.get("used") else "unspent")
+            self._add_info_row(local, "Kind", "mock" if selected.get("is_mock") else "real token")
+            layout.addWidget(local_box)
+
+            details_box = QGroupBox("Proof details")
+            details_layout = QVBoxLayout(details_box)
+            amounts = data.get("proof_amount_breakdown") or {}
+            amount_table = QTableWidget(len(amounts), 2)
+            amount_table.setHorizontalHeaderLabels(["Denomination", "Count"])
+            amount_table.verticalHeader().setVisible(False)
+            for row, (amount, count) in enumerate(sorted(amounts.items(), key=lambda item: int(item[0]))):
+                amount_table.setItem(row, 0, QTableWidgetItem(str(amount)))
+                amount_table.setItem(row, 1, QTableWidgetItem(str(count)))
+            details_layout.addWidget(amount_table)
+            self._add_wrapped_label(details_layout, "Keysets: " + ", ".join(data.get("keyset_ids") or []))
+            self._add_wrapped_label(
+                details_layout,
+                "DLEQ: "
+                + ("yes" if data.get("has_dleq") else "no")
+                + " | Witness: "
+                + ("yes" if data.get("has_witness") else "no"),
+            )
+            expiry = data.get("expiry")
+            if expiry:
+                self._add_wrapped_label(details_layout, f"Expiry: {expiry}")
+            layout.addWidget(details_box, stretch=1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(dialog.reject)
@@ -327,8 +430,11 @@ class MainWindow(QWidget):
         dialog.exec()
 
     def _token_preview_text(self, token_text: str) -> str:
+        return json.dumps(self._token_preview_data(token_text), indent=2, ensure_ascii=False)
+
+    def _token_preview_data(self, token_text: str) -> dict[str, Any]:
         if not token_text:
-            return ""
+            return {}
         try:
             token = deserialize_token_from_string(token_text)
             proofs = list(getattr(token, "proofs", []))
@@ -339,7 +445,7 @@ class MainWindow(QWidget):
                 for proof in proofs
                 for condition in self._secret_conditions(str(getattr(proof, "secret", "") or ""))
             ]
-            data = {
+            data: dict[str, Any] = {
                 "token_prefix": token_text[:6],
                 "token_type": type(token).__name__,
                 "mint": str(getattr(token, "mint", "") or ""),
@@ -361,9 +467,25 @@ class MainWindow(QWidget):
             }
             if len(proofs) > 8:
                 data["secret_previews"].append(f"... {len(proofs) - 8} more")
-            return json.dumps(data, indent=2, ensure_ascii=False)
+            return data
         except Exception as exc:
-            return f"Could not parse token:\n{type(exc).__name__}: {exc}"
+            return {"error": f"Could not parse token: {type(exc).__name__}: {exc}"}
+
+    def _selected_token_row(self) -> dict[str, Any]:
+        for token in self._tokens:
+            if token.get("id") == self._selected_token_id:
+                return token
+        return {}
+
+    def _add_info_row(self, layout: QFormLayout, label: str, value: str) -> None:
+        value_label = QLabel(value or "-")
+        value_label.setWordWrap(True)
+        layout.addRow(label, value_label)
+
+    def _add_wrapped_label(self, layout: QVBoxLayout, text: str) -> None:
+        label = QLabel(text)
+        label.setWordWrap(True)
+        layout.addWidget(label)
 
     def _secret_conditions(self, secret: str) -> list[dict[str, Any]]:
         try:
@@ -422,7 +544,22 @@ class MainWindow(QWidget):
         self.status_label.setText(text)
 
     def append_debug(self, text: str) -> None:
-        self.debug_box.append(f"<pre>{html.escape(text)}</pre>")
+        color = "#ff5c6c" if self._is_error_log(text) else "#39ff72"
+        self.debug_box.append(f'<pre style="color: {color};">{html.escape(text)}</pre>')
+
+    def _is_error_log(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(
+            marker in lowered
+            for marker in [
+                "error",
+                "exception",
+                "failed",
+                "could not",
+                "not available",
+                "unavailable",
+            ]
+        )
 
     def clear_debug(self) -> None:
         self.debug_box.clear()
@@ -437,6 +574,13 @@ class MainWindow(QWidget):
             self.show_qr(str(qr_path))
         if "selected_token_text" in state:
             self._selected_token_text = str(state.get("selected_token_text") or "")
+        pending_invoice = bool(state.get("pending_invoice"))
+        mint_ready = bool(state.get("mint_ready"))
+        self.mint_token_button.setEnabled(pending_invoice and mint_ready)
+        if pending_invoice and not self._invoice_poll_timer.isActive():
+            self._invoice_poll_timer.start()
+        elif not pending_invoice and self._invoice_poll_timer.isActive():
+            self._invoice_poll_timer.stop()
 
     def show_qr(self, path: str) -> None:
         self._current_qr_path = path
@@ -463,7 +607,8 @@ class MainWindow(QWidget):
         for row, token in enumerate(self._tokens):
             for column, value in enumerate(
                 [
-                    str(token.get("created_at", "")),
+                    self._short_datetime(str(token.get("created_at", ""))),
+                    str(token.get("mint_label") or "?"),
                     str(token.get("label", "")),
                     str(token.get("amount", "")),
                 ]
@@ -480,7 +625,7 @@ class MainWindow(QWidget):
                     {"id": token_id},
                 )
             )
-            self.tokens_table.setCellWidget(row, 3, spent_button)
+            self.tokens_table.setCellWidget(row, 4, spent_button)
 
             delete_button = QPushButton("Trash")
             delete_button.setProperty("dangerButton", True)
@@ -490,10 +635,10 @@ class MainWindow(QWidget):
                     {"id": token_id},
                 )
             )
-            self.tokens_table.setCellWidget(row, 4, delete_button)
+            self.tokens_table.setCellWidget(row, 5, delete_button)
 
     def _token_cell_clicked(self, row: int, column: int) -> None:
-        if column >= 3:
+        if column >= 4:
             return
         item = self.tokens_table.item(row, column)
         if item is None:
@@ -502,6 +647,11 @@ class MainWindow(QWidget):
         if token_id is not None:
             self._selected_token_id = int(token_id)
             self.action_requested.emit("show_token", {"id": token_id})
+
+    def _short_datetime(self, value: str) -> str:
+        if len(value) >= 16:
+            return f"{value[2:10]}|{value[11:16]}"
+        return value
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(
@@ -516,6 +666,16 @@ class MainWindow(QWidget):
                 font-size: 15pt;
                 font-weight: 600;
                 color: #ffffff;
+            }
+            QLabel#AppTitle {
+                font-size: 15pt;
+                font-weight: 700;
+                color: #b56cff;
+            }
+            QLabel#Version {
+                color: #7a828c;
+                font-size: 9pt;
+                padding-top: 5px;
             }
             QLabel#Status {
                 color: #9ad1ff;
@@ -571,6 +731,13 @@ class MainWindow(QWidget):
                 border-radius: 5px;
                 padding: 6px;
                 color: #e8e8e8;
+            }
+            QTextBrowser#VerboseLog {
+                background: #070b08;
+                border-color: #2f5f3b;
+                color: #39ff72;
+                font-family: Consolas, Cascadia Mono, monospace;
+                font-size: 9pt;
             }
             QHeaderView::section {
                 background: #1b2026;

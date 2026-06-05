@@ -34,7 +34,6 @@ INVOICE_TXT = ROOT / "temp_invoice.txt"
 INVOICE_QR = ROOT / "temp_invoice.png"
 TOKEN_TXT = ROOT / "temp_token.txt"
 TOKEN_QR = ROOT / "temp_token.png"
-TOKEN_PREVIEW_QR_TEMPLATE = "temp_token_preview_{token_id}.png"
 SEED_BACKUP = ROOT / "temp_seed_backup.txt"
 
 DEBUG = True
@@ -172,6 +171,14 @@ class TokenStore:
                 )
                 """
             )
+            columns = {
+                row[1]
+                for row in conn.execute('PRAGMA table_info("tokens")').fetchall()
+            }
+            if "mint_label" not in columns:
+                conn.execute('ALTER TABLE tokens ADD COLUMN mint_label TEXT NOT NULL DEFAULT "?"')
+            if "mint_url" not in columns:
+                conn.execute('ALTER TABLE tokens ADD COLUMN mint_url TEXT NOT NULL DEFAULT ""')
 
     def insert(
         self,
@@ -211,7 +218,8 @@ class TokenStore:
             where = "" if include_used else "WHERE used = 0"
             rows = conn.execute(
                 f"""
-                SELECT id, created_at, mint_label, amount, label, used, is_mock
+                SELECT id, created_at, COALESCE(mint_label, '?') AS mint_label,
+                       amount, label, used, is_mock
                 FROM tokens
                 {where}
                 ORDER BY id DESC
@@ -226,7 +234,8 @@ class TokenStore:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 """
-                SELECT id, created_at, mint_label, mint_url, amount, label,
+                SELECT id, created_at, COALESCE(mint_label, '?') AS mint_label,
+                       COALESCE(mint_url, '') AS mint_url, amount, label,
                        token_text, token_txt_path, token_png_path, used, is_mock
                 FROM tokens
                 WHERE id = ?
@@ -269,7 +278,11 @@ class CashuWorker(QObject):
         self._store = TokenStore(APP_DB)
         self._pending_quote_id: str | None = None
         self._pending_amount: int | None = None
+        self._pending_label: str | None = None
+        self._pending_mint_ready = False
+        self._auto_mint_in_progress = False
         self._show_used_tokens = False
+        self._cleanup_old_temp_previews()
 
     @pyqtSlot()
     def initialize(self) -> None:
@@ -293,6 +306,9 @@ class CashuWorker(QObject):
         self._mint_index = index
         self._pending_quote_id = None
         self._pending_amount = None
+        self._pending_label = None
+        self._pending_mint_ready = False
+        self._auto_mint_in_progress = False
         self._log(f"Switched mint to {self._mint().label} ({self._mint().url}).")
         self._emit_state()
         self._load_mint_info_safely()
@@ -311,10 +327,13 @@ class CashuWorker(QObject):
                 self._save_seed_to_env()
             elif action == "request_invoice":
                 amount = self._payload_amount(payload)
-                self._run_async(self._request_invoice(amount))
+                label = self._payload_label(payload)
+                self._run_async(self._request_invoice(amount, label))
             elif action == "mint_token":
                 label = self._payload_label(payload)
                 self._run_async(self._mint_token(label))
+            elif action == "check_invoice_payment":
+                self._run_async(self._check_invoice_payment())
             elif action == "mock_token":
                 amount = self._payload_amount(payload)
                 label = self._payload_label(payload, default_prefix="mock-token")
@@ -340,8 +359,15 @@ class CashuWorker(QObject):
             else:
                 self._log(f"Unknown action: {action}")
         except Exception as exc:
-            self.status_signal.emit("Error")
-            self._log(f"ERROR: {type(exc).__name__}: {exc}")
+            if action == "mint_info":
+                self.status_signal.emit("Mint unavailable")
+                self._log(
+                    f"Mint info is not available for {self._mint().label} "
+                    f"({self._mint().url}): {type(exc).__name__}: {exc}"
+                )
+            else:
+                self.status_signal.emit("Error")
+                self._log(f"ERROR: {type(exc).__name__}: {exc}")
 
     def _mint(self) -> MintProfile:
         return MINTS[self._mint_index]
@@ -356,7 +382,14 @@ class CashuWorker(QObject):
             db=str(ROOT / mint.db),
             name=mint.wallet_name,
         )
-        await wallet.load_mint()
+        try:
+            await wallet.load_mint()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Mint is not available or returned invalid metadata: {mint.url}"
+            ) from exc
+        if not getattr(wallet, "keysets", None):
+            raise RuntimeError(f"Mint keysets are not available: {mint.url}")
         return wallet
 
     def _mint_for_url(self, url: str | None) -> MintProfile:
@@ -380,8 +413,18 @@ class CashuWorker(QObject):
         try:
             self._run_async(self._mint_info())
         except Exception as exc:
-            self.status_signal.emit("Error")
-            self._log(f"ERROR while loading mint info: {type(exc).__name__}: {exc}")
+            self.status_signal.emit("Mint unavailable")
+            self._log(
+                f"Mint info is not available for {self._mint().label} "
+                f"({self._mint().url}): {type(exc).__name__}: {exc}"
+            )
+
+    def _cleanup_old_temp_previews(self) -> None:
+        for path in ROOT.glob("temp_token_preview_*.png"):
+            try:
+                path.unlink()
+            except Exception as exc:
+                self._log(f"Could not delete old temp preview {path}: {exc}")
 
     def _payload_amount(self, payload: dict[str, Any]) -> int:
         raw = str(payload.get("amount") or "").strip()
@@ -471,7 +514,7 @@ class CashuWorker(QObject):
         self.status_signal.emit("Ready")
         self._emit_state()
 
-    async def _request_invoice(self, amount: int) -> None:
+    async def _request_invoice(self, amount: int, label: str) -> None:
         self.status_signal.emit("Requesting invoice...")
         self._log_section("Request invoice")
         wallet = await self._wallet()
@@ -485,12 +528,46 @@ class CashuWorker(QObject):
             raise RuntimeError("Could not obtain Lightning invoice.")
         self._pending_quote_id = str(quote_id)
         self._pending_amount = amount
+        self._pending_label = label
+        self._pending_mint_ready = self._quote_is_paid(quote)
+        self._auto_mint_in_progress = False
         save_text_and_qr(str(invoice), INVOICE_TXT, INVOICE_QR)
         self._log(f"QUOTE ID:\n{quote_id}")
         self._log(f"LIGHTNING INVOICE:\n{invoice}")
         self._log(f"Invoice saved to:\n{INVOICE_TXT}\n{INVOICE_QR}")
-        self.status_signal.emit("Invoice ready")
+        self.status_signal.emit("Waiting for payment")
         self._emit_state(qr_path=INVOICE_QR)
+
+    async def _check_invoice_payment(self) -> None:
+        if (
+            not self._pending_quote_id
+            or not self._pending_amount
+            or self._auto_mint_in_progress
+        ):
+            return
+
+        wallet = await self._wallet()
+        quote = await self._get_mint_quote_compat(wallet, self._pending_quote_id)
+        state = str(get_any_attr(quote, ["state"], "") or "")
+        self._log(f"Payment check for quote {self._pending_quote_id}: {state or '<unknown>'}")
+        if not self._quote_is_paid(quote):
+            self._pending_mint_ready = False
+            self.status_signal.emit("Waiting for payment")
+            self._emit_state()
+            return
+
+        self._pending_mint_ready = True
+        self._emit_state()
+        self._auto_mint_in_progress = True
+        self.status_signal.emit("Payment found, minting...")
+        try:
+            await self._mint_token(self._pending_label or f"token-{now()}")
+        except Exception as exc:
+            self._auto_mint_in_progress = False
+            self._pending_mint_ready = True
+            self.status_signal.emit("Payment found, manual mint available")
+            self._log(f"Automatic mint failed, manual mint is available: {type(exc).__name__}: {exc}")
+            self._emit_state()
 
     async def _mint_token(self, label: str) -> None:
         if not self._pending_quote_id or not self._pending_amount:
@@ -516,6 +593,9 @@ class CashuWorker(QObject):
         self._log(f"Token saved as row {row_id}:\n{TOKEN_TXT}\n{TOKEN_QR}")
         self._pending_quote_id = None
         self._pending_amount = None
+        self._pending_label = None
+        self._pending_mint_ready = False
+        self._auto_mint_in_progress = False
         self.status_signal.emit("Token ready")
         self._emit_state(qr_path=TOKEN_QR)
 
@@ -543,8 +623,8 @@ class CashuWorker(QObject):
         if not token:
             raise RuntimeError(f"Token row {token_id} not found.")
 
-        txt_path = Path(str(token.get("token_txt_path") or TOKEN_TXT))
-        png_path = ROOT / TOKEN_PREVIEW_QR_TEMPLATE.format(token_id=token_id)
+        txt_path = TOKEN_TXT
+        png_path = TOKEN_QR
         token_text = str(token.get("token_text") or "")
 
         if token_text:
@@ -833,6 +913,18 @@ class CashuWorker(QObject):
         ]
         return await self._try_compat("request_mint", attempts)
 
+    async def _get_mint_quote_compat(self, wallet: Wallet, quote_id: str) -> Any:
+        attempts = [
+            ("get_mint_quote(quote_id)", lambda: wallet.get_mint_quote(quote_id)),
+            ("get_mint_quote(quote=quote_id)", lambda: wallet.get_mint_quote(quote=quote_id)),
+        ]
+        return await self._try_compat("get_mint_quote", attempts)
+
+    def _quote_is_paid(self, quote: Any) -> bool:
+        state = get_any_attr(quote, ["state"], "")
+        state_value = str(get_any_attr(state, ["value"], state) or "").lower()
+        return state_value in {"paid", "mintquotestate.paid"}
+
     async def _mint_compat(self, wallet: Wallet, amount: int, quote_id: str) -> Any:
         attempts = [
             ("mint(amount=amount, quote_id=quote_id)", lambda: wallet.mint(amount=amount, quote_id=quote_id)),
@@ -950,7 +1042,9 @@ class CashuWorker(QObject):
         mint = self._mint()
         state = {
             "mint": {"label": mint.label, "url": mint.url, "db": str(ROOT / mint.db)},
-            "tokens": self._store.last(5, include_used=self._show_used_tokens),
+            "tokens": self._store.last(21, include_used=self._show_used_tokens),
+            "pending_invoice": bool(self._pending_quote_id),
+            "mint_ready": self._pending_mint_ready,
         }
         if qr_path:
             state["qr_path"] = str(qr_path)
