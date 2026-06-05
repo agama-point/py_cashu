@@ -1,5 +1,11 @@
 # py_cashu
 
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab.svg)
+![Cashu](https://img.shields.io/badge/Cashu-ecash-orange.svg)
+![Bitcoin](https://img.shields.io/badge/Bitcoin-Lightning-f7931a.svg)
+![Purpose](https://img.shields.io/badge/purpose-education%20%26%20testing-orange.svg)
+
 A small educational project exploring the Cashu protocol from Python.
 
 The goal is not to build a production-ready wallet. The project is a hands-on
@@ -91,13 +97,16 @@ The app keeps the same educational shape:
 - invoice TXT/PNG generation
 - token TXT/PNG generation
 - local token history in `cashu_app.sqlite3`
+- saving pasted tokens without redeeming them
 - redeeming pasted tokens into the selected mint, including cross-mint moves
   through Lightning when needed
+- unspent/all token history filtering
 - offline mock tokens for testing token database behavior
 
 The token table stores `created_at`, mint, amount, label, token text, output
 paths, used/unspent state, and whether the row is a mock token. The UI shows the
-last five rows and provides actions to toggle used state or delete a row.
+latest token rows and provides actions to show a token, toggle used state, or
+delete a row.
 
 ## Seed And `.env`
 
@@ -202,6 +211,9 @@ Working:
 - Lightning invoice generation
 - QR code generation
 - Cashu token export
+- pasted token save/import
+- same-mint token redeem into fresh local proofs
+- cross-mint token redeem through Lightning
 - SQLite wallet inspection
 - `.env` mnemonic import/export
 - local token table with mock-token testing
@@ -212,13 +224,27 @@ Not production ready:
 - robust error handling
 - secure secret storage
 - multi-mint wallet management
-- token import / receive flow
 - Lightning withdrawal flow
+- batched export of several independent tokens from one paid mint quote
+- P2PK/HTLC locked tokens with locktime or refund behavior
 
 ## Notes
 
 This is an experiment, not a production Evolu Python client. Any real Evolu
 logic still belongs to the official TypeScript packages.
+
+## Protocol Notes
+
+The repository includes a portable protocol note:
+
+- [CASHU_TOKEN_NOTES.md](./CASHU_TOKEN_NOTES.md)
+
+It summarizes the current research discussion around Cashu proofs, serialized
+tokens, binary denomination splits, multi-token batches, QR-size trade-offs, and
+expiration-like behavior through spending conditions such as P2PK locktime.
+
+These ideas are documentation only for now. The current Qt app does not yet
+implement batched multi-token minting or expiring/locked Cashu tokens.
 
 ## References
 
