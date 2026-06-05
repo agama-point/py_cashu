@@ -1,4 +1,4 @@
-# py_cashu
+# py_cashu | Agama Cashu App
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab.svg)
