@@ -14,8 +14,10 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
+from PIL import Image, ImageDraw, ImageFont
 import qrcode
 from cashu.core.helpers import sum_proofs
+from cashu.core.split import amount_split
 from cashu.wallet.wallet import Wallet
 from cashu.wallet.helpers import deserialize_token_from_string
 from dotenv import load_dotenv, set_key
@@ -34,6 +36,7 @@ INVOICE_TXT = ROOT / "temp_invoice.txt"
 INVOICE_QR = ROOT / "temp_invoice.png"
 TOKEN_TXT = ROOT / "temp_token.txt"
 TOKEN_QR = ROOT / "temp_token.png"
+TOKENS_PDF_DIR = ROOT / "tokens_pdf"
 SEED_BACKUP = ROOT / "temp_seed_backup.txt"
 
 DEBUG = True
@@ -71,6 +74,14 @@ MINTS = [
 
 def now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def short_stamp() -> str:
+    return datetime.now(timezone.utc).astimezone().strftime("%y%m%d|%H:%M")
+
+
+def file_stamp() -> str:
+    return datetime.now(timezone.utc).astimezone().strftime("%y%m%d_%H_%M")
 
 
 def compact_ws(value: str) -> str:
@@ -279,6 +290,11 @@ class CashuWorker(QObject):
         self._pending_quote_id: str | None = None
         self._pending_amount: int | None = None
         self._pending_label: str | None = None
+        self._pending_multi_count: int | None = None
+        self._pending_multi_amount: int | None = None
+        self._pending_multi_splits: list[list[int]] = []
+        self._pending_multi_pdf = False
+        self._pending_multi_common_label = ""
         self._pending_mint_ready = False
         self._auto_mint_in_progress = False
         self._show_used_tokens = False
@@ -307,6 +323,7 @@ class CashuWorker(QObject):
         self._pending_quote_id = None
         self._pending_amount = None
         self._pending_label = None
+        self._clear_pending_multi()
         self._pending_mint_ready = False
         self._auto_mint_in_progress = False
         self._log(f"Switched mint to {self._mint().label} ({self._mint().url}).")
@@ -329,6 +346,15 @@ class CashuWorker(QObject):
                 amount = self._payload_amount(payload)
                 label = self._payload_label(payload)
                 self._run_async(self._request_invoice(amount, label))
+            elif action == "request_multi_invoice":
+                amount = self._payload_amount(payload)
+                count = self._payload_multi_count(payload)
+                label = self._payload_label(payload, default_prefix="multi-token")
+                create_pdf = bool(payload.get("create_pdf"))
+                common_label = str(payload.get("common_label") or "").strip()
+                self._run_async(
+                    self._request_multi_invoice(amount, count, label, create_pdf, common_label)
+                )
             elif action == "mint_token":
                 label = self._payload_label(payload)
                 self._run_async(self._mint_token(label))
@@ -340,6 +366,8 @@ class CashuWorker(QObject):
                 self._create_mock_token(amount, label)
             elif action == "show_token":
                 self._show_token(int(payload.get("id")))
+            elif action == "check_token_state":
+                self._run_async(self._check_saved_token_state(int(payload.get("id"))))
             elif action == "set_token_filter":
                 self._set_token_filter(str(payload.get("filter") or "unspent"))
             elif action == "redeem_pasted_token":
@@ -439,6 +467,22 @@ class CashuWorker(QObject):
         label = str(payload.get("label") or "").strip()
         return label if label else f"{default_prefix}-{now()}"
 
+    def _payload_multi_count(self, payload: dict[str, Any]) -> int:
+        raw = str(payload.get("count") or "").strip()
+        if not raw.isdigit():
+            raise ValueError("Token count must be 1, 3, or 5.")
+        count = int(raw)
+        if count not in {1, 3, 5}:
+            raise ValueError("Token count must be 1, 3, or 5.")
+        return count
+
+    def _clear_pending_multi(self) -> None:
+        self._pending_multi_count = None
+        self._pending_multi_amount = None
+        self._pending_multi_splits = []
+        self._pending_multi_pdf = False
+        self._pending_multi_common_label = ""
+
     async def _mint_info(self) -> None:
         self.status_signal.emit("Loading mint info...")
         self._log_section("Mint info")
@@ -517,6 +561,7 @@ class CashuWorker(QObject):
     async def _request_invoice(self, amount: int, label: str) -> None:
         self.status_signal.emit("Requesting invoice...")
         self._log_section("Request invoice")
+        self._clear_pending_multi()
         wallet = await self._wallet()
         quote = await self._request_mint_compat(wallet, amount)
         self._log_json("Quote object", quote)
@@ -536,6 +581,62 @@ class CashuWorker(QObject):
         self._log(f"LIGHTNING INVOICE:\n{invoice}")
         self._log(f"Invoice saved to:\n{INVOICE_TXT}\n{INVOICE_QR}")
         self.status_signal.emit("Waiting for payment")
+        self._emit_state(qr_path=INVOICE_QR)
+
+    async def _request_multi_invoice(
+        self,
+        amount_per_token: int,
+        count: int,
+        label: str,
+        create_pdf: bool,
+        common_label: str,
+    ) -> None:
+        self.status_signal.emit("Requesting multi-token invoice...")
+        self._log_section("Request multi-token invoice")
+        token_split = sorted(amount_split(amount_per_token), reverse=True)
+        if not token_split:
+            raise ValueError("Amount per token must be greater than zero.")
+        splits = [token_split[:] for _ in range(count)]
+        total_amount = amount_per_token * count
+
+        wallet = await self._wallet()
+        quote = await self._request_mint_compat(wallet, total_amount)
+        self._log_json("Quote object", quote)
+        quote_id = get_any_attr(quote, ["quote", "quote_id", "id"])
+        invoice = get_any_attr(quote, ["request", "invoice", "pr", "payment_request"])
+        if not quote_id:
+            raise RuntimeError("Could not obtain quote_id.")
+        if not invoice:
+            raise RuntimeError("Could not obtain Lightning invoice.")
+
+        self._pending_quote_id = str(quote_id)
+        self._pending_amount = total_amount
+        self._pending_label = label
+        self._pending_multi_count = count
+        self._pending_multi_amount = amount_per_token
+        self._pending_multi_splits = splits
+        self._pending_multi_pdf = create_pdf
+        self._pending_multi_common_label = common_label
+        self._pending_mint_ready = self._quote_is_paid(quote)
+        self._auto_mint_in_progress = False
+
+        save_text_and_qr(str(invoice), INVOICE_TXT, INVOICE_QR)
+        self._log(
+            "\n".join(
+                [
+                    f"Multi-token plan: {count} x {amount_per_token} sats",
+                    f"Invoice total: {total_amount} sats",
+                    f"Per-token split: {token_split}",
+                    f"Total proof count: {sum(len(split) for split in splits)}",
+                    f"Create PDF: {'yes' if create_pdf else 'no'}",
+                    f"Common label: {common_label or '<empty>'}",
+                ]
+            )
+        )
+        self._log(f"QUOTE ID:\n{quote_id}")
+        self._log(f"LIGHTNING INVOICE:\n{invoice}")
+        self._log(f"Invoice saved to:\n{INVOICE_TXT}\n{INVOICE_QR}")
+        self.status_signal.emit("Waiting for multi-token payment")
         self._emit_state(qr_path=INVOICE_QR)
 
     async def _check_invoice_payment(self) -> None:
@@ -561,7 +662,10 @@ class CashuWorker(QObject):
         self._auto_mint_in_progress = True
         self.status_signal.emit("Payment found, minting...")
         try:
-            await self._mint_token(self._pending_label or f"token-{now()}")
+            if self._pending_multi_count:
+                await self._mint_multi_tokens(self._pending_label or f"multi-token-{now()}")
+            else:
+                await self._mint_token(self._pending_label or f"token-{now()}")
         except Exception as exc:
             self._auto_mint_in_progress = False
             self._pending_mint_ready = True
@@ -572,6 +676,9 @@ class CashuWorker(QObject):
     async def _mint_token(self, label: str) -> None:
         if not self._pending_quote_id or not self._pending_amount:
             raise RuntimeError("Create an invoice first, pay it, then mint the token.")
+        if self._pending_multi_count:
+            await self._mint_multi_tokens(label)
+            return
         self.status_signal.emit("Minting token...")
         self._log_section("Mint token after payment")
         wallet = await self._wallet()
@@ -594,10 +701,253 @@ class CashuWorker(QObject):
         self._pending_quote_id = None
         self._pending_amount = None
         self._pending_label = None
+        self._clear_pending_multi()
         self._pending_mint_ready = False
         self._auto_mint_in_progress = False
         self.status_signal.emit("Token ready")
         self._emit_state(qr_path=TOKEN_QR)
+
+    async def _mint_multi_tokens(self, label: str) -> None:
+        if not self._pending_quote_id or not self._pending_amount:
+            raise RuntimeError("Create an invoice first, pay it, then mint the tokens.")
+        if not self._pending_multi_count or not self._pending_multi_amount or not self._pending_multi_splits:
+            raise RuntimeError("No multi-token plan is pending.")
+
+        self.status_signal.emit("Minting multi-token batch...")
+        self._log_section("Mint multi-token batch after payment")
+        wallet = await self._wallet()
+        flat_split = [amount for split in self._pending_multi_splits for amount in split]
+        if sum(flat_split) != self._pending_amount:
+            raise RuntimeError("Multi-token split does not match the pending invoice amount.")
+
+        proofs = await self._mint_compat(
+            wallet,
+            self._pending_amount,
+            self._pending_quote_id,
+            split=flat_split,
+        )
+        self._log_json("Proofs", proofs)
+
+        groups = self._group_proofs_by_splits(list(proofs), self._pending_multi_splits)
+        row_ids: list[int] = []
+        tokens: list[str] = []
+        group_splits: list[list[int]] = []
+        last_token = ""
+        stamp = short_stamp()
+        for index, group in enumerate(groups, start=1):
+            token = await self._serialize_token_compat(wallet, group)
+            if not token:
+                raise RuntimeError(f"Token {index} is empty.")
+            last_token = str(token)
+            tokens.append(last_token)
+            save_text_and_qr(last_token, TOKEN_TXT, TOKEN_QR)
+            proof_split = [int(getattr(proof, "amount", 0) or 0) for proof in group]
+            group_splits.append(proof_split)
+            token_label = f"multi#{index}_{stamp}"
+            row_id = self._store.insert(
+                mint=self._mint(),
+                amount=self._pending_multi_amount,
+                label=token_label,
+                token=last_token,
+                is_mock=False,
+            )
+            row_ids.append(row_id)
+            self._log(
+                "\n".join(
+                    [
+                        f"MULTI TOKEN {index}/{self._pending_multi_count}",
+                        f"Amount: {self._pending_multi_amount}",
+                        f"Proof split: {proof_split}",
+                        f"Saved row: {row_id}",
+                        last_token,
+                    ]
+                )
+            )
+
+        if self._pending_multi_pdf:
+            pdf_path = self._create_multi_token_pdf(
+                tokens=tokens,
+                amount_per_token=self._pending_multi_amount,
+                splits=group_splits,
+                created_stamp=stamp,
+                common_label=self._pending_multi_common_label,
+            )
+            self._log(f"Multi-token PDF saved:\n{pdf_path}")
+
+        self._pending_quote_id = None
+        self._pending_amount = None
+        self._pending_label = None
+        self._clear_pending_multi()
+        self._pending_mint_ready = False
+        self._auto_mint_in_progress = False
+        self.status_signal.emit(f"Multi-token batch ready ({len(row_ids)} tokens)")
+        self._log(f"Multi-token batch saved rows: {row_ids}")
+        self._emit_state(qr_path=TOKEN_QR if last_token else None)
+
+    def _create_multi_token_pdf(
+        self,
+        *,
+        tokens: list[str],
+        amount_per_token: int,
+        splits: list[list[int]],
+        created_stamp: str,
+        common_label: str,
+    ) -> Path:
+        TOKENS_PDF_DIR.mkdir(parents=True, exist_ok=True)
+        pdf_path = self._unique_pdf_path(TOKENS_PDF_DIR / f"agama_cashu_{file_stamp()}.pdf")
+        width, height = 2480, 3508
+        margin = 100
+        gutter = 36
+        page = Image.new("RGB", (width, height), "white")
+        draw = ImageDraw.Draw(page)
+        font_title = self._pdf_font(42)
+        font_body = self._pdf_font(30)
+        font_small = self._pdf_font(24)
+
+        cell_w = (width - 2 * margin - gutter) // 2
+        cell_h = (height - 2 * margin - 2 * gutter) // 3
+        cells: list[tuple[int, int, int, int]] = []
+        for row in range(3):
+            for col in range(2):
+                left = margin + col * (cell_w + gutter)
+                top = margin + row * (cell_h + gutter)
+                cells.append((left, top, left + cell_w, top + cell_h))
+
+        for cell in cells:
+            draw.rectangle(cell, outline=(190, 190, 190), width=3)
+
+        for index, token in enumerate(tokens[:5], start=1):
+            left, top, right, bottom = cells[index - 1]
+            qr = self._make_pdf_qr_with_logo_space(token)
+            qr_size = min(right - left - 90, bottom - top - 170)
+            qr = qr.resize((qr_size, qr_size))
+            draw.text((left + 34, top + 28), str(index), fill="black", font=font_title)
+            draw.text(
+                (left + 96, top + 38),
+                self._pdf_caption(amount_per_token, splits[index - 1], common_label),
+                fill=(30, 30, 30),
+                font=font_small,
+            )
+            page.paste(qr, (left + (right - left - qr_size) // 2, top + 100))
+
+        info_left, info_top, info_right, info_bottom = cells[5]
+        info_lines = [
+            "Agama Cashu multi-token batch",
+            f"Created: {created_stamp}",
+            f"Mint: {self._mint().url}",
+            f"Token count: {len(tokens)}",
+            f"Amount per token: {amount_per_token} sats",
+            f"Total amount: {amount_per_token * len(tokens)} sats",
+            f"Common label: {common_label or '-'}",
+            "",
+            "Proof structure:",
+        ]
+        for index, split in enumerate(splits, start=1):
+            info_lines.append(f"{index}: {split} = {sum(split)}")
+        info_lines.extend(
+            [
+                "",
+                "Each QR is an independent serialized Cashu token.",
+                "Redeem tokens into fresh proofs before relying on them.",
+            ]
+        )
+        y = info_top + 40
+        for line_index, line in enumerate(info_lines):
+            font = font_body if line_index == 0 else font_small
+            draw.text((info_left + 36, y), line, fill="black", font=font)
+            y += 46 if line_index == 0 else 34
+            if y > info_bottom - 40:
+                break
+
+        page.save(pdf_path, "PDF", resolution=300.0)
+        return pdf_path
+
+    def _make_pdf_qr_with_logo_space(self, token: str) -> Image.Image:
+        qr_code = qrcode.QRCode(
+            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            border=4,
+            box_size=10,
+        )
+        qr_code.add_data(token)
+        qr_code.make(fit=True)
+        image = qr_code.make_image(fill_color="black", back_color="white").convert("RGB")
+
+        module_count = len(qr_code.modules)
+        box_size = int(getattr(qr_code, "box_size", 10) or 10)
+        requested_modules = 20
+        max_modules = max(8, module_count // 4)
+        clear_modules = min(requested_modules, max_modules)
+        clear_px = clear_modules * box_size
+        center = image.size[0] // 2
+        half = clear_px // 2
+        draw = ImageDraw.Draw(image)
+        draw.rectangle(
+            (center - half, center - half, center + half, center + half),
+            fill="white",
+        )
+        self._paste_pdf_qr_logo(image, center - half, center - half, clear_px)
+        return image
+
+    def _paste_pdf_qr_logo(self, image: Image.Image, left: int, top: int, size: int) -> None:
+        logo_path = TOKENS_PDF_DIR / "logo.png"
+        if not logo_path.exists():
+            return
+        try:
+            logo = Image.open(logo_path).convert("RGBA")
+            logo = logo.resize((size, size), Image.Resampling.LANCZOS)
+            image.paste(logo.convert("RGB"), (left, top), logo)
+        except Exception as exc:
+            self._log(f"Could not paste QR logo {logo_path}: {exc}")
+
+    def _pdf_caption(self, amount: int, split: list[int], common_label: str) -> str:
+        caption = f"{amount} sats | proofs {split}"
+        if common_label:
+            caption = f"{caption} | {common_label}"
+        return caption[:92]
+
+    def _pdf_font(self, size: int) -> ImageFont.ImageFont:
+        for path in [
+            "C:/Windows/Fonts/segoeui.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+        ]:
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+        return ImageFont.load_default()
+
+    def _unique_pdf_path(self, path: Path) -> Path:
+        if not path.exists():
+            return path
+        for index in range(2, 100):
+            candidate = path.with_name(f"{path.stem}_{index}{path.suffix}")
+            if not candidate.exists():
+                return candidate
+        raise RuntimeError(f"Could not find a free PDF filename near {path}.")
+
+    def _group_proofs_by_splits(self, proofs: list[Any], splits: list[list[int]]) -> list[list[Any]]:
+        pool = list(proofs)
+        groups: list[list[Any]] = []
+        for split in splits:
+            group: list[Any] = []
+            for amount in split:
+                match_index = next(
+                    (
+                        index
+                        for index, proof in enumerate(pool)
+                        if int(getattr(proof, "amount", 0) or 0) == amount
+                    ),
+                    None,
+                )
+                if match_index is None:
+                    raise RuntimeError(f"Mint returned no proof for amount {amount}.")
+                group.append(pool.pop(match_index))
+            if sum_proofs(group) != sum(split):
+                raise RuntimeError("Grouped proofs do not match the planned token amount.")
+            groups.append(group)
+        if pool:
+            raise RuntimeError(f"Mint returned {len(pool)} unexpected extra proofs.")
+        return groups
 
     def _create_mock_token(self, amount: int, label: str) -> None:
         self.status_signal.emit("Creating mock token...")
@@ -648,7 +998,56 @@ class CashuWorker(QObject):
         )
         self._log(f"TOKEN TXT:\n{token_text}")
         self.status_signal.emit(f"Showing token #{token_id}")
-        self._emit_state(qr_path=png_path, selected_token_text=token_text)
+        self._emit_state(
+            qr_path=png_path,
+            selected_token_text=token_text,
+            selected_token_state={},
+        )
+
+    async def _check_saved_token_state(self, token_id: int) -> None:
+        token = self._store.get(token_id)
+        if not token:
+            raise RuntimeError(f"Token row {token_id} not found.")
+        token_text = str(token.get("token_text") or "")
+        self.status_signal.emit("Checking token state...")
+        mint_state = await self._check_token_mint_state(token)
+        self._log_json("token mint state", mint_state)
+        self.status_signal.emit(f"Token state checked #{token_id}")
+        self._emit_state(selected_token_text=token_text, selected_token_state=mint_state)
+
+    async def _check_token_mint_state(self, token: dict[str, Any]) -> dict[str, Any]:
+        if token.get("is_mock"):
+            return {"error": "mock token has no mint proof state"}
+        token_text = str(token.get("token_text") or "").strip()
+        if not token_text:
+            return {"error": "empty token"}
+        try:
+            token_obj = deserialize_token_from_string(token_text)
+            proofs = list(getattr(token_obj, "proofs", []))
+            if not proofs:
+                return {"error": "token has no proofs"}
+            mint_url = str(getattr(token_obj, "mint", "") or token.get("mint_url") or self._mint().url)
+            mint = self._mint_for_url(mint_url)
+            wallet = await self._wallet_for_mint(mint)
+            if hasattr(wallet, "_expand_short_keyset_ids"):
+                await wallet._expand_short_keyset_ids(proofs)
+            response = await wallet.check_proof_state(proofs)
+            states = list(getattr(response, "states", []) or [])
+            values = [
+                str(get_any_attr(get_any_attr(state, ["state"], ""), ["value"], get_any_attr(state, ["state"], ""))).lower()
+                for state in states
+            ]
+            summary: dict[str, int] = {}
+            for value in values:
+                key = value.split(".")[-1] if value else "unknown"
+                summary[key] = summary.get(key, 0) + 1
+            return {
+                "mint": mint.url,
+                "summary": summary,
+                "states": values,
+            }
+        except Exception as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
 
     async def _redeem_pasted_token(self, token_text: str, label: str) -> None:
         if not token_text:
@@ -925,7 +1324,24 @@ class CashuWorker(QObject):
         state_value = str(get_any_attr(state, ["value"], state) or "").lower()
         return state_value in {"paid", "mintquotestate.paid"}
 
-    async def _mint_compat(self, wallet: Wallet, amount: int, quote_id: str) -> Any:
+    async def _mint_compat(
+        self,
+        wallet: Wallet,
+        amount: int,
+        quote_id: str,
+        *,
+        split: list[int] | None = None,
+    ) -> Any:
+        if split:
+            attempts = [
+                (
+                    "mint(amount=amount, quote_id=quote_id, split=split)",
+                    lambda: wallet.mint(amount=amount, quote_id=quote_id, split=split),
+                ),
+                ("mint(amount, quote_id, split)", lambda: wallet.mint(amount, quote_id, split)),
+            ]
+            return await self._try_compat("mint with split", attempts)
+
         attempts = [
             ("mint(amount=amount, quote_id=quote_id)", lambda: wallet.mint(amount=amount, quote_id=quote_id)),
             ("mint(amount, quote_id=quote_id)", lambda: wallet.mint(amount, quote_id=quote_id)),
@@ -1038,7 +1454,12 @@ class CashuWorker(QObject):
                     print("SQLite error:", exc)
         return buffer.getvalue()
 
-    def _emit_state(self, qr_path: Path | None = None, selected_token_text: str | None = None) -> None:
+    def _emit_state(
+        self,
+        qr_path: Path | None = None,
+        selected_token_text: str | None = None,
+        selected_token_state: dict[str, Any] | None = None,
+    ) -> None:
         mint = self._mint()
         state = {
             "mint": {"label": mint.label, "url": mint.url, "db": str(ROOT / mint.db)},
@@ -1050,6 +1471,7 @@ class CashuWorker(QObject):
             state["qr_path"] = str(qr_path)
         if selected_token_text is not None:
             state["selected_token_text"] = selected_token_text
+            state["selected_token_state"] = selected_token_state or {}
         self.data_signal.emit(state)
 
     def _log_json(self, label: str, value: object) -> None:

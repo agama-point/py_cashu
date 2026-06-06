@@ -10,6 +10,7 @@ from cashu.wallet.helpers import deserialize_token_from_string
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -23,6 +24,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -33,7 +35,7 @@ from PyQt6.QtWidgets import (
 )
 
 
-VER = "0.2 | 2026-06"
+VER = "0.21 | 2026-06"
 
 
 class MainWindow(QWidget):
@@ -50,6 +52,8 @@ class MainWindow(QWidget):
         self._current_qr_path = ""
         self._selected_token_id: int | None = None
         self._selected_token_text = ""
+        self._selected_token_state: dict[str, Any] = {}
+        self._mint_state_value_label: QLabel | None = None
         self._invoice_poll_timer = QTimer(self)
         self._invoice_poll_timer.setInterval(10_000)
         self._invoice_poll_timer.timeout.connect(self._poll_invoice_payment)
@@ -152,6 +156,9 @@ class MainWindow(QWidget):
         self.mint_token_button = self._action_button("Mint token after payment", "mint_token")
         invoice_actions.addWidget(self.mint_token_button)
         self.mint_token_button.setEnabled(False)
+        multi_btn = QPushButton("Multi token")
+        multi_btn.clicked.connect(self._open_multi_token_dialog)
+        invoice_actions.addWidget(multi_btn)
         invoice_actions.addWidget(self._action_button("Create mock token", "mock_token"))
         invoice_actions.addStretch()
         invoice_layout.addLayout(invoice_actions)
@@ -361,6 +368,157 @@ class MainWindow(QWidget):
         action["kind"] = kind
         dialog.accept()
 
+    def _open_multi_token_dialog(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Multi token")
+        dialog.resize(620, 460)
+
+        layout = QVBoxLayout(dialog)
+        note = QLabel(
+            "Create one Lightning invoice for a total amount, then mint several "
+            "independent Cashu tokens after payment."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        form_box = QGroupBox("Plan")
+        form = QFormLayout(form_box)
+
+        count_row = QHBoxLayout()
+        count_group = QButtonGroup(dialog)
+        count_buttons: dict[int, QRadioButton] = {}
+        for count in [1, 3, 5]:
+            button = QRadioButton(str(count))
+            if count == 3:
+                button.setChecked(True)
+            count_group.addButton(button, count)
+            count_buttons[count] = button
+            count_row.addWidget(button)
+        count_row.addStretch()
+        form.addRow("Tokens", count_row)
+
+        amount_input = QLineEdit(self.amount_input.text().strip() or "21")
+        amount_input.setPlaceholderText("Amount per token in sats")
+        form.addRow("Value", amount_input)
+
+        label_input = QLineEdit(self.label_input.text().strip())
+        label_input.setPlaceholderText("Batch label")
+        form.addRow("Label", label_input)
+
+        create_pdf_checkbox = QCheckBox("create pdf")
+        form.addRow("", create_pdf_checkbox)
+
+        common_label_input = QLineEdit("Agama Point Academy - Education Cashu Token")
+        common_label_input.setPlaceholderText("Common label for PDF QR captions")
+        form.addRow("Common label", common_label_input)
+        layout.addWidget(form_box)
+
+        preview = QTextEdit()
+        preview.setReadOnly(True)
+        preview.setMinimumHeight(180)
+        layout.addWidget(preview, stretch=1)
+
+        def selected_count() -> int:
+            checked = count_group.checkedId()
+            return checked if checked in {1, 3, 5} else 1
+
+        def refresh_preview() -> None:
+            raw = amount_input.text().strip()
+            if not raw.isdigit() or int(raw) <= 0:
+                preview.setPlainText("Enter a positive amount per token.")
+                return
+            amount = int(raw)
+            count = selected_count()
+            split = self._amount_split(amount)
+            total = amount * count
+            total_proofs = len(split) * count
+            better = self._nearby_amount_suggestions(amount)
+            lines = [
+                f"Amount per token: {amount} sats",
+                f"Token count: {count}",
+                f"Invoice total: {total} sats",
+                "",
+                f"Per-token proof split: {split}",
+                f"Proofs per token: {len(split)}",
+                f"Total proofs: {total_proofs}",
+                f"Flattened mint split: {split * count}",
+                "",
+                self._qr_hint(total_proofs),
+            ]
+            if better:
+                lines.extend(["", "Nearby amounts with fewer proofs:"])
+                lines.extend(better)
+            preview.setPlainText("\n".join(lines))
+
+        for button in count_buttons.values():
+            button.toggled.connect(refresh_preview)
+        amount_input.textChanged.connect(refresh_preview)
+        refresh_preview()
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        create_btn = QPushButton("Create invoice")
+        cancel_btn = QPushButton("Cancel")
+        create_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+        buttons.addWidget(create_btn)
+        buttons.addWidget(cancel_btn)
+        layout.addLayout(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        raw_amount = amount_input.text().strip()
+        if not raw_amount.isdigit() or int(raw_amount) <= 0:
+            QMessageBox.information(dialog, "Multi token", "Enter a positive amount per token.")
+            return
+
+        self.action_requested.emit(
+            "request_multi_invoice",
+            {
+                "amount": raw_amount,
+                "count": selected_count(),
+                "label": label_input.text().strip(),
+                "create_pdf": create_pdf_checkbox.isChecked(),
+                "common_label": common_label_input.text().strip(),
+            },
+        )
+
+    def _amount_split(self, amount: int) -> list[int]:
+        if amount <= 0:
+            return []
+        return [
+            1 << i
+            for i in range(amount.bit_length() - 1, -1, -1)
+            if amount & (1 << i)
+        ]
+
+    def _qr_hint(self, proof_count: int) -> str:
+        if proof_count <= 15:
+            return "QR estimate: comfortable."
+        if proof_count <= 30:
+            return "QR estimate: probably workable, but preview before sending."
+        return "QR estimate: large. Consider fewer tokens or a nearby amount with fewer proofs."
+
+    def _nearby_amount_suggestions(self, amount: int) -> list[str]:
+        current = len(self._amount_split(amount))
+        suggestions: list[tuple[int, int]] = []
+        lower = max(1, amount - 32)
+        upper = amount + 32
+        for candidate in range(lower, upper + 1):
+            if candidate == amount:
+                continue
+            proof_count = len(self._amount_split(candidate))
+            if proof_count < current:
+                suggestions.append((candidate, proof_count))
+        if not suggestions:
+            return []
+        suggestions.sort(key=lambda item: (item[1], abs(item[0] - amount), item[0]))
+        return [
+            f"- {candidate} sats ({proof_count} proofs, delta {candidate - amount:+d})"
+            for candidate, proof_count in suggestions[:5]
+        ]
+
     def _open_token_info_dialog(self) -> None:
         if not self._selected_token_text:
             QMessageBox.information(self, "Token info", "Select a saved token first.")
@@ -396,9 +554,14 @@ class MainWindow(QWidget):
             self._add_info_row(local, "ID", str(selected.get("id") or self._selected_token_id or ""))
             self._add_info_row(local, "Created", str(selected.get("created_at") or ""))
             self._add_info_row(local, "Label", str(selected.get("label") or ""))
-            self._add_info_row(local, "State", "spent" if selected.get("used") else "unspent")
+            self._mint_state_value_label = QLabel("?")
+            self._mint_state_value_label.setWordWrap(True)
+            self._apply_mint_state_style(self._mint_state_value_label, {})
+            local.addRow("Mint state", self._mint_state_value_label)
             self._add_info_row(local, "Kind", "mock" if selected.get("is_mock") else "real token")
             layout.addWidget(local_box)
+            if self._selected_token_id is not None:
+                self.action_requested.emit("check_token_state", {"id": self._selected_token_id})
 
             details_box = QGroupBox("Proof details")
             details_layout = QVBoxLayout(details_box)
@@ -427,7 +590,10 @@ class MainWindow(QWidget):
         buttons.rejected.connect(dialog.reject)
         buttons.accepted.connect(dialog.accept)
         layout.addWidget(buttons)
-        dialog.exec()
+        try:
+            dialog.exec()
+        finally:
+            self._mint_state_value_label = None
 
     def _token_preview_text(self, token_text: str) -> str:
         return json.dumps(self._token_preview_data(token_text), indent=2, ensure_ascii=False)
@@ -476,6 +642,29 @@ class MainWindow(QWidget):
             if token.get("id") == self._selected_token_id:
                 return token
         return {}
+
+    def _mint_state_label(self) -> str:
+        if not self._selected_token_state:
+            return "?"
+        if self._selected_token_state.get("error"):
+            return f"unavailable ({self._selected_token_state.get('error')})"
+        summary = self._selected_token_state.get("summary") or {}
+        parts = [f"{key}: {value}" for key, value in summary.items()]
+        return ", ".join(parts) if parts else "unknown"
+
+    def _apply_mint_state_style(self, label: QLabel, state: dict[str, Any]) -> None:
+        summary = state.get("summary") or {}
+        if state.get("error"):
+            color = "#d7a64a"
+        elif summary and set(summary) <= {"unspent"}:
+            color = "#39ff72"
+        elif summary.get("spent"):
+            color = "#ff5c6c"
+        elif summary.get("pending"):
+            color = "#d7a64a"
+        else:
+            color = "#c9d1d9"
+        label.setStyleSheet(f"color: {color}; font-weight: 700;")
 
     def _add_info_row(self, layout: QFormLayout, label: str, value: str) -> None:
         value_label = QLabel(value or "-")
@@ -574,6 +763,13 @@ class MainWindow(QWidget):
             self.show_qr(str(qr_path))
         if "selected_token_text" in state:
             self._selected_token_text = str(state.get("selected_token_text") or "")
+            self._selected_token_state = dict(state.get("selected_token_state") or {})
+            if self._mint_state_value_label is not None:
+                self._mint_state_value_label.setText(self._mint_state_label())
+                self._apply_mint_state_style(
+                    self._mint_state_value_label,
+                    self._selected_token_state,
+                )
         pending_invoice = bool(state.get("pending_invoice"))
         mint_ready = bool(state.get("mint_ready"))
         self.mint_token_button.setEnabled(pending_invoice and mint_ready)
@@ -650,7 +846,7 @@ class MainWindow(QWidget):
 
     def _short_datetime(self, value: str) -> str:
         if len(value) >= 16:
-            return f"{value[2:10]}|{value[11:16]}"
+            return f"{value[2:4]}{value[5:7]}{value[8:10]}|{value[11:16]}"
         return value
 
     def _apply_theme(self) -> None:
@@ -724,6 +920,26 @@ class MainWindow(QWidget):
             }
             QPushButton[tokenButton="true"] {
                 text-align: center;
+            }
+            QRadioButton::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 8px;
+                border: 2px solid #9aa4af;
+                background: #6f7883;
+            }
+            QRadioButton::indicator:checked {
+                border: 5px solid #8d98a3;
+                background: #050607;
+            }
+            QCheckBox::indicator {
+                width: 15px;
+                height: 15px;
+                border: 1px solid #9aa4af;
+                background: #1b2026;
+            }
+            QCheckBox::indicator:checked {
+                background: #9ad1ff;
             }
             QLineEdit, QComboBox, QTextBrowser, QTextEdit, QTableWidget {
                 background: #0f1114;
