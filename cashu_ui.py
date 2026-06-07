@@ -925,21 +925,29 @@ class MainWindow(QWidget):
                 width: 16px;
                 height: 16px;
                 border-radius: 8px;
-                border: 2px solid #9aa4af;
+                border: 2px solid #58616b;
                 background: #6f7883;
             }
             QRadioButton::indicator:checked {
-                border: 5px solid #8d98a3;
-                background: #050607;
+                border: 3px solid #58616b;
+                background: #39ff14;
+            }
+            QRadioButton::indicator:hover {
+                border-color: #c7d0da;
             }
             QCheckBox::indicator {
-                width: 15px;
-                height: 15px;
-                border: 1px solid #9aa4af;
+                width: 16px;
+                height: 16px;
+                border: 2px solid #58616b;
+                border-radius: 3px;
                 background: #1b2026;
             }
             QCheckBox::indicator:checked {
-                background: #9ad1ff;
+                border: 3px solid #58616b;
+                background: #39ff14;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #c7d0da;
             }
             QLineEdit, QComboBox, QTextBrowser, QTextEdit, QTableWidget {
                 background: #0f1114;
