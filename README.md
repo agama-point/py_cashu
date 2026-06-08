@@ -1,4 +1,4 @@
-# py_cashu | Agama Cashu App
+# py_cashu
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab.svg)
@@ -97,6 +97,8 @@ The app keeps the same educational shape:
 - invoice TXT/PNG generation
 - token TXT/PNG generation
 - local token history in `cashu_app.sqlite3`
+- experimental multi-token invoice flow for 1, 3, or 5 independent tokens
+- optional A4 PDF export for multi-token QR batches
 - saving pasted tokens without redeeming them
 - redeeming pasted tokens into the selected mint, including cross-mint moves
   through Lightning when needed
@@ -152,6 +154,12 @@ Seed backup, created only when loading a new mnemonic from `.env` into SQLite:
 
 ```text
 temp_seed_backup.txt
+```
+
+Optional multi-token PDF export:
+
+```text
+tokens_pdf/agama_cashu_RRMMDD_hh_mm.pdf
 ```
 
 Local wallet database:
@@ -211,6 +219,9 @@ Working:
 - Lightning invoice generation
 - QR code generation
 - Cashu token export
+- experimental batched export of several independent tokens from one paid mint
+  quote
+- optional multi-token A4 PDF sheet with QR codes and proof structure notes
 - pasted token save/import
 - same-mint token redeem into fresh local proofs
 - cross-mint token redeem through Lightning
@@ -225,7 +236,6 @@ Not production ready:
 - secure secret storage
 - multi-mint wallet management
 - Lightning withdrawal flow
-- batched export of several independent tokens from one paid mint quote
 - P2PK/HTLC locked tokens with locktime or refund behavior
 
 ## Notes
@@ -243,8 +253,26 @@ It summarizes the current research discussion around Cashu proofs, serialized
 tokens, binary denomination splits, multi-token batches, QR-size trade-offs, and
 expiration-like behavior through spending conditions such as P2PK locktime.
 
-These ideas are documentation only for now. The current Qt app does not yet
-implement batched multi-token minting or expiring/locked Cashu tokens.
+The current Qt app includes an experimental multi-token invoice/export flow for
+1, 3, or 5 independent tokens. Expiring/locked Cashu tokens are still
+documentation-only research notes for now.
+
+---
+[agama-point/agama_linky_sandbox](https://github.com/agama-point/agama_linky_sandbox)
+
+[agama-point/py_nostr](https://github.com/agama-point/py_nostr)
+
+`py_nostr` is a small experimental Python wrapper around `pynostr` for working with Nostr keys, events, relays, publishing, user metadata, and direct messages. It is useful for local protocol experiments, but scripts that publish events or send DMs perform real Nostr actions when configured with a private key.
+
+[agama-point/py_cashu](https://github.com/agama-point/py_cashu)
+
+`py_cashu` is an educational Python project for exploring Cashu ecash flows: mints, Lightning invoices, blind signatures, proofs, bearer tokens, wallet seed material, and token transfers. It is a console and desktop experiment for understanding the protocol, not a production wallet.
+
+[octopusengine/py_evolu](https://github.com/octopusengine/py_evolu)
+
+`py_evolu` is a Python experiment around Evolu local-first data, owner mnemonics, SQLite storage, backup export, restore, and relay sync. Because Evolu has no official Python client, it uses a small TypeScript sidecar with the official Evolu packages.
+
+---
 
 ## References
 
