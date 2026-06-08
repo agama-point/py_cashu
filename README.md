@@ -258,17 +258,20 @@ The current Qt app includes an experimental multi-token invoice/export flow for
 documentation-only research notes for now.
 
 ---
+
 [agama-point/agama_linky_sandbox](https://github.com/agama-point/agama_linky_sandbox)
 
-[agama-point/py_nostr](https://github.com/agama-point/py_nostr)
+`agama_linky_sandbox` is a local testing and learning sandbox for [hynek-jina/linky](https://github.com/hynek-jina/linky), focused on key derivation, local tooling, and small protocol experiments around Linky's Nostr, Cashu, and Evolu integrations.
+
+🔗 [agama-point/py_nostr](https://github.com/agama-point/py_nostr)
 
 `py_nostr` is a small experimental Python wrapper around `pynostr` for working with Nostr keys, events, relays, publishing, user metadata, and direct messages. It is useful for local protocol experiments, but scripts that publish events or send DMs perform real Nostr actions when configured with a private key.
 
-[agama-point/py_cashu](https://github.com/agama-point/py_cashu)
+🔗 [agama-point/py_cashu](https://github.com/agama-point/py_cashu)
 
 `py_cashu` is an educational Python project for exploring Cashu ecash flows: mints, Lightning invoices, blind signatures, proofs, bearer tokens, wallet seed material, and token transfers. It is a console and desktop experiment for understanding the protocol, not a production wallet.
 
-[octopusengine/py_evolu](https://github.com/octopusengine/py_evolu)
+🔗 [octopusengine/py_evolu](https://github.com/octopusengine/py_evolu)
 
 `py_evolu` is a Python experiment around Evolu local-first data, owner mnemonics, SQLite storage, backup export, restore, and relay sync. Because Evolu has no official Python client, it uses a small TypeScript sidecar with the official Evolu packages.
 
